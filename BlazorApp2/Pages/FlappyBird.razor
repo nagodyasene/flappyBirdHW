@@ -1,0 +1,351 @@
+@page "/flappybird"
+@implements IDisposable
+@inject IJSRuntime JSRuntime
+@inject GameAssetsService GameAssets
+@using BlazorApp2.Services
+
+<PageTitle>Flappy Bird</PageTitle>
+
+<div class="game-container" @onkeydown="HandleKeyDown" @onkeydown:preventDefault="true" tabindex="0" @ref="gameContainer">
+    <div class="game-area" style="position: relative; width: 800px; height: 600px; background: @GameAssets.BackgroundColor; overflow: hidden; border: 2px solid #333;">
+        
+        <!-- Background elements -->
+        <div class="background" style="position: absolute; width: 100%; height: 100%; background-image: url('@GameAssets.BackgroundImage'); background-repeat: repeat-x; background-position: @backgroundPosition px 0;"></div>
+        
+        <!-- Ground -->
+        <div class="ground" style="position: absolute; bottom: 0; width: 100%; height: 100px; background: @GameAssets.GroundColor; background-image: url('@GameAssets.GroundImage'); background-repeat: repeat-x; background-position: @groundPosition px 0;"></div>
+        
+        <!-- Bird -->
+        <div class="bird" style="position: absolute; left: @(bird.X)px; top: @(bird.Y)px; width: 40px; height: 30px; background: @GameAssets.BirdColor; background-image: url('@GameAssets.BirdImage'); background-size: contain; background-repeat: no-repeat; transform: rotate(@(bird.Rotation)deg); transition: transform 0.1s;"></div>
+        
+        <!-- Pipes -->
+        @foreach (var pipe in pipes)
+        {
+            <!-- Top pipe -->
+            <div class="pipe pipe-top" style="position: absolute; left: @(pipe.X)px; top: 0; width: 80px; height: @(pipe.TopHeight)px; background: @GameAssets.PipeColor; background-image: url('@GameAssets.PipeImage'); background-size: contain; background-repeat: no-repeat;"></div>
+            
+            <!-- Bottom pipe -->
+            <div class="pipe pipe-bottom" style="position: absolute; left: @(pipe.X)px; bottom: 100px; width: 80px; height: @(pipe.BottomHeight)px; background: @GameAssets.PipeColor; background-image: url('@GameAssets.PipeImage'); background-size: contain; background-repeat: no-repeat; transform: rotate(180deg);"></div>
+        }
+        
+        <!-- Score -->
+        <div class="score" style="position: absolute; top: 20px; left: 20px; font-size: 36px; font-weight: bold; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.8);">
+            Score: @score
+        </div>
+        
+        <!-- Game Over Screen -->
+        @if (gameState == GameState.GameOver)
+        {
+            <div class="game-over" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; flex-direction: column; justify-content: center; align-items: center; color: white;">
+                <h2 style="font-size: 48px; margin-bottom: 20px;">Game Over!</h2>
+                <p style="font-size: 24px; margin-bottom: 20px;">Final Score: @score</p>
+                <p style="font-size: 18px; margin-bottom: 30px;">Best Score: @bestScore</p>
+                <button @onclick="RestartGame" style="padding: 15px 30px; font-size: 20px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                    Play Again
+                </button>
+            </div>
+        }
+        
+        <!-- Start Screen -->
+        @if (gameState == GameState.WaitingToStart)
+        {
+            <div class="start-screen" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: flex; flex-direction: column; justify-content: center; align-items: center; color: white;">
+                <h1 style="font-size: 54px; margin-bottom: 30px;">Flappy Bird</h1>
+                <p style="font-size: 24px; margin-bottom: 20px;">Press SPACE or click to start!</p>
+                <p style="font-size: 18px;">Use SPACE to flap your wings</p>
+            </div>
+        }
+    </div>
+    
+    <!-- Asset Management Controls -->
+    <div style="margin-top: 20px; text-align: center;">
+        <div style="margin-bottom: 15px;">
+            <button @onclick="UseDefaultColors" style="margin: 5px; padding: 10px 20px; background: #2196F3; color: white; border: none; border-radius: 5px;">
+                Default Colors
+            </button>
+            <button @onclick="LoadClassicPack" style="margin: 5px; padding: 10px 20px; background: #FF9800; color: white; border: none; border-radius: 5px;">
+                Load Classic Pack
+            </button>
+            <button @onclick="LoadModernPack" style="margin: 5px; padding: 10px 20px; background: #9C27B0; color: white; border: none; border-radius: 5px;">
+                Load Modern Pack
+            </button>
+        </div>
+        <p>Controls: Press SPACE to flap | Click anywhere on the game area to flap</p>
+        <p>Avoid the pipes and try to get the highest score!</p>
+        <p><em>Asset packs can be easily swapped by placing images in wwwroot/assets/flappybird/[packname]/</em></p>
+    </div>
+</div>
+
+@code {
+    private ElementReference gameContainer;
+    private Timer? gameTimer;
+    private GameState gameState = GameState.WaitingToStart;
+    private Bird bird = new();
+    private List<Pipe> pipes = new();
+    private int score = 0;
+    private int bestScore = 0;
+    private double backgroundPosition = 0;
+    private double groundPosition = 0;
+    private Random random = new();
+
+    // Game constants
+    private const double Gravity = 0.8;
+    private const double JumpForce = -12;
+    private const double PipeSpeed = 3;
+    private const double BackgroundSpeed = 1;
+    private const double GroundSpeed = 4;
+    private const int PipeGap = 200;
+    private const int PipeWidth = 80;
+    private const int GameWidth = 800;
+    private const int GameHeight = 600;
+    private const int GroundHeight = 100;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await JSRuntime.InvokeVoidAsync("eval", @"
+                document.addEventListener('keydown', function(e) {
+                    if (e.code === 'Space') {
+                        e.preventDefault();
+                        DotNet.invokeMethodAsync('BlazorApp2', 'HandleSpaceKey');
+                    }
+                });
+                
+                document.addEventListener('click', function(e) {
+                    if (e.target.closest('.game-area')) {
+                        DotNet.invokeMethodAsync('BlazorApp2', 'HandleClick');
+                    }
+                });
+            ");
+            
+            await gameContainer.FocusAsync();
+        }
+    }
+
+    [JSInvokable]
+    public static void HandleSpaceKey()
+    {
+        // This will be handled by the current instance
+    }
+
+    [JSInvokable]
+    public static void HandleClick()
+    {
+        // This will be handled by the current instance
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Code == "Space")
+        {
+            await HandleInput();
+        }
+    }
+
+    private async Task HandleInput()
+    {
+        if (gameState == GameState.WaitingToStart)
+        {
+            StartGame();
+        }
+        else if (gameState == GameState.Playing)
+        {
+            Jump();
+        }
+    }
+
+    private void StartGame()
+    {
+        gameState = GameState.Playing;
+        bird = new Bird { X = 100, Y = 250, Velocity = 0, Rotation = 0 };
+        pipes.Clear();
+        score = 0;
+        backgroundPosition = 0;
+        groundPosition = 0;
+        
+        // Start the game loop
+        gameTimer = new Timer(GameLoop, null, 0, 16); // ~60 FPS
+    }
+
+    private void Jump()
+    {
+        bird.Velocity = GameAssets.JumpForce;
+        bird.Rotation = -20;
+    }
+
+    private void GameLoop(object? state)
+    {
+        if (gameState != GameState.Playing) return;
+
+        // Update bird physics
+        bird.Velocity += GameAssets.Gravity;
+        bird.Y += bird.Velocity;
+        
+        // Update bird rotation based on velocity
+        bird.Rotation = Math.Min(90, bird.Velocity * 3);
+
+        // Move background
+        backgroundPosition -= BackgroundSpeed;
+        if (backgroundPosition <= -GameWidth) backgroundPosition = 0;
+        
+        // Move ground
+        groundPosition -= GroundSpeed;
+        if (groundPosition <= -GameWidth) groundPosition = 0;
+
+        // Update pipes
+        for (int i = pipes.Count - 1; i >= 0; i--)
+        {
+            pipes[i].X -= GameAssets.PipeSpeed;
+            
+            // Remove pipes that are off screen
+            if (pipes[i].X < -PipeWidth)
+            {
+                pipes.RemoveAt(i);
+                continue;
+            }
+            
+            // Check for scoring
+            if (!pipes[i].Scored && pipes[i].X + PipeWidth < bird.X)
+            {
+                pipes[i].Scored = true;
+                score++;
+            }
+        }
+
+        // Add new pipes
+        if (pipes.Count == 0 || pipes.Last().X < GameWidth - 300)
+        {
+            AddPipe();
+        }
+
+        // Check collisions
+        if (CheckCollisions())
+        {
+            GameOver();
+            return;
+        }
+
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void AddPipe()
+    {
+        int gapStart = random.Next(100, GameHeight - GroundHeight - GameAssets.PipeGap - 100);
+        pipes.Add(new Pipe
+        {
+            X = GameWidth,
+            TopHeight = gapStart,
+            BottomHeight = GameHeight - GroundHeight - gapStart - GameAssets.PipeGap,
+            Scored = false
+        });
+    }
+
+    private bool CheckCollisions()
+    {
+        // Check ground collision
+        if (bird.Y > GameHeight - GroundHeight - 30)
+            return true;
+            
+        // Check ceiling collision
+        if (bird.Y < 0)
+            return true;
+
+        // Check pipe collisions
+        foreach (var pipe in pipes)
+        {
+            if (bird.X + 40 > pipe.X && bird.X < pipe.X + PipeWidth)
+            {
+                if (bird.Y < pipe.TopHeight || bird.Y + 30 > GameHeight - GroundHeight - pipe.BottomHeight)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private void GameOver()
+    {
+        gameState = GameState.GameOver;
+        gameTimer?.Dispose();
+        
+        if (score > bestScore)
+        {
+            bestScore = score;
+        }
+    }
+
+    private void RestartGame()
+    {
+        // First dispose the timer to stop any running game loop
+        gameTimer?.Dispose();
+        gameTimer = null;
+        
+        // Reset to waiting state instead of immediately starting
+        gameState = GameState.WaitingToStart;
+        
+        // Reset bird to initial state with no velocity
+        bird = new Bird { X = 100, Y = 250, Velocity = 0, Rotation = 0 };
+        
+        // Clear all pipes
+        pipes.Clear();
+        
+        // Reset score and positions
+        score = 0;
+        backgroundPosition = 0;
+        groundPosition = 0;
+        
+        // Force UI update to show the start screen
+        StateHasChanged();
+    }
+
+    // Asset management methods
+    private void UseDefaultColors()
+    {
+        GameAssets.UseDefaultColors();
+        StateHasChanged();
+    }
+
+    private void LoadClassicPack()
+    {
+        GameAssets.LoadAssetPack("classic");
+        StateHasChanged();
+    }
+
+    private void LoadModernPack()
+    {
+        GameAssets.LoadAssetPack("modern");
+        StateHasChanged();
+    }
+
+    public void Dispose()
+    {
+        gameTimer?.Dispose();
+    }
+
+    // Game classes
+    public class Bird
+    {
+        public double X { get; set; } = 100;
+        public double Y { get; set; } = 250;
+        public double Velocity { get; set; } = 0;
+        public double Rotation { get; set; } = 0;
+    }
+
+    public class Pipe
+    {
+        public double X { get; set; }
+        public int TopHeight { get; set; }
+        public int BottomHeight { get; set; }
+        public bool Scored { get; set; }
+    }
+
+    public enum GameState
+    {
+        WaitingToStart,
+        Playing,
+        GameOver
+    }
+}
